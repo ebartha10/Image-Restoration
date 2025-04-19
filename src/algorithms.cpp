@@ -8,7 +8,50 @@
 bool isInside(Mat source, Point P_0) {
     return P_0.x >= 0 && P_0.x < source.cols && P_0.y >= 0 && P_0.y < source.rows;
 }
+Mat compute_mask(Mat src, const int threshhold) {
+    Mat mask;
+    Mat hsv;
+    cvtColor(src, hsv, COLOR_BGR2HSV);
+    vector<Mat> hsvChannels;
+    split(hsv, hsvChannels);
+    Mat saturation = hsvChannels[1];
+    mask = Mat::zeros(src.rows, src.cols, CV_8UC1);
+    inRange(src, Scalar(240, 240, 240), Scalar(255, 255, 255), mask);
 
+    // Add to mask potential unwanted pixels based on saturation difference
+    for (int y = 0; y < src.rows; y++) {
+        for (int x = 0; x < src.cols; x++) {
+            if (mask.at<uchar>(y, x) == 0) {
+                int currentSaturation = saturation.at<uchar>(y, x);
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        if (dx == 0 && dy == 0) continue;
+
+                        int nx = x + dx;
+                        int ny = y + dy;
+
+                        if (isInside(src, Point(nx, ny)) && mask.at<uchar>(nx, ny) == 0) {
+                            int neighborSaturation = saturation.at<uchar>(ny, nx);
+
+                            int satDiff = abs(currentSaturation - neighborSaturation);
+                            if (satDiff > threshhold) {
+                                if(currentSaturation <= neighborSaturation) {
+                                    mask.at<uchar>(y, x) = 255;
+                                }
+                                if(neighborSaturation < currentSaturation) {
+                                    mask.at<uchar>(ny, nx) = 255;
+                                }
+                            }
+                        }
+                    }
+                    //if (mask.at<uchar>(y, x) == 255) break;
+                }
+            }
+        }
+    }
+    imshow("mask", mask);
+    return mask;
+}
 // === BILINEAR INTERPOLATION === //
 /**
  * Reconstructs a given colored image using bilinear interpolation.
@@ -18,51 +61,54 @@ bool isInside(Mat source, Point P_0) {
 Mat bilinear_reconstruction(Mat src) {
     // Highlight white pixels
     Mat mask = Mat::zeros(src.rows, src.cols, CV_8UC1);
-    inRange(src, Scalar(220,220,220), Scalar(255,255,255), mask);
-    Mat initialMask = mask.clone();
+    Mat initialMask = Mat::zeros(src.rows, src.cols, CV_8UC1);
+    inRange(src, Scalar(240, 240, 240), Scalar(255, 255, 255), initialMask);
 
     bool changed = false;
     int iteration = 0;
-
+    const int maxSatDiff = 30;
     Mat dst = src.clone();
+
     do {
         changed = false;
-        for(int y = 0; y < src.rows; y++) {
-            for(int x = 0; x < src.cols; x++) {
-                if(mask.at<uchar>(y, x) == 255) {
-                    Vec3f interpolated = Vec3f(0,0,0);
+        mask = compute_mask(dst, maxSatDiff);
+
+        for (int y = 0; y < src.rows; y++) {
+            for (int x = 0; x < src.cols; x++) {
+                if (mask.at<uchar>(y, x) == 255) {
+                    Vec3f interpolated = Vec3f(0, 0, 0);
                     int count = 0;
-                    Vec3b sample;
                     vector<Point> neighbors;
 
-                    for (int dy = -2; dy <= 2; ++dy) {
-                        for (int dx = -2; dx <= 2; ++dx) {
-
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        for (int dx = -1; dx <= 1; ++dx) {
                             int nx = x + dx;
                             int ny = y + dy;
-                            if(nx == x && ny == y) {
+                            if (nx == x && ny == y) {
                                 continue;
                             }
                             neighbors.push_back(Point(nx, ny));
                         }
                     }
 
-                    for(auto point : neighbors) {
-                        if(isInside(src, point) && mask.at<uchar>(point.y, point.x) == 0) {
-                            interpolated += dst.at<Vec3b>(point.y,point.x);
-                            mask.at<uchar>(point.y,point.x) = 0;
-
+                    for (auto point : neighbors) {
+                        if (isInside(src, point) && mask.at<uchar>(point.y, point.x) == 0 && initialMask.at<uchar>(point.y, point.x) == 0) {
+                            interpolated += dst.at<Vec3b>(point.y, point.x);
                             count++;
                         }
                     }
-                    if(count > 0) {
-                        dst.at<Vec3b>(y,x) = interpolated / count;
+                    if (count > 0) {
+                        dst.at<Vec3b>(y, x) = interpolated / count;
+                        initialMask.at<uchar>(y, x) = 0;
                         changed = true;
                     }
                 }
             }
         }
-    }while(iteration++ < MAX_ITERATIONS && changed);
+        imshow(to_string(iteration), dst);
+        imshow("mask", mask);
+        waitKey(1);
+    } while (iteration++ < MAX_ITERATIONS && changed);
     return dst;
 }
 
@@ -133,7 +179,7 @@ int getKernel(const Mat& src, const Mat& mask, int x, int y, int channel, float 
  * @return True if the kernel can be used for interpolation
  */
 bool processKernel(float kernel[4][4], int validPixels) {
-    if (validPixels < 4) {
+    if (validPixels < 2) {
         // Not enough valid pixels for interpolation
         return false;
     }
@@ -193,53 +239,6 @@ bool hasValidNeighbors(Mat& mask, int x, int y) {
 }
 
 /**
- * Checks if an interpolated color is consistent with unaffected neighbors
- * @param src Original image
- * @param originalMask Original mask of white pixels
- * @param x X coordinate
- * @param y Y coordinate
- * @param interpolatedColor Interpolated color to validate
- * @return True if the interpolated color is consistent with neighbors
- */
-bool isColorConsistent(const Mat& src, const Mat& originalMask, int x, int y, const Vec3b& interpolatedColor) {
-    Vec3f avgUnaffected(0, 0, 0);
-    int count = 0;
-    float maxAllowedDiff = 30.0f; // Maximum allowed difference per channel
-
-    // Check 8-connected neighbors
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            if (dx == 0 && dy == 0) continue;
-            
-            int nx = x + dx;
-            int ny = y + dy;
-            
-            // Only consider unaffected pixels (not in original mask)
-            if (isInside(src, Point(nx, ny)) && originalMask.at<uchar>(ny, nx) == 0) {
-                Vec3b neighborColor = src.at<Vec3b>(ny, nx);
-                avgUnaffected += Vec3f(neighborColor);
-                count++;
-            }
-        }
-    }
-
-    if (count > 0) {
-        avgUnaffected /= count;
-        
-        // Check if the interpolated color is within acceptable range of average unaffected neighbors
-        for (int c = 0; c < 3; c++) {
-            float diff = std::abs(interpolatedColor[c] - avgUnaffected[c]);
-            if (diff > maxAllowedDiff) {
-                return false;
-            }
-        }
-        return true;
-    }
-    
-    return true; // If no unaffected neighbors found, accept the interpolated color
-}
-
-/**
  * Reconstructs a given colored image using bicubic interpolation.
  * @param src Image to restore. Needs to be a colored image.
  * @return Restored image with white pixels interpolated with neighbors.
@@ -247,17 +246,15 @@ bool isColorConsistent(const Mat& src, const Mat& originalMask, int x, int y, co
 Mat bicubic_reconstruction(const Mat& src) {
     // Highlight white pixels to interpolate
     Mat mask;
-    inRange(src, Scalar(240, 240, 230), Scalar(255, 255, 255), mask);
-    Mat originalMask = mask.clone(); // Keep track of original white pixels
 
     Mat dst = src.clone();
-    Mat currentMask = mask.clone();
     Mat processedMask = Mat::zeros(mask.size(), CV_8U); // Track successfully processed pixels
 
     bool changed = false;
     int iteration = 0;
-    float maxAllowedDiff = 30.0f; // Start with initial threshold
-
+    constexpr int maxAllowedDiff = 20   ;
+    Mat currentMask = compute_mask(src, maxAllowedDiff);
+    Mat originalMask = currentMask.clone();
     do {
         changed = false;
 
@@ -294,10 +291,6 @@ Mat bicubic_reconstruction(const Mat& src) {
                         currentMask.at<uchar>(y, x) = 0;
                         changed = true;
 
-                        // Mark as processed if color is consistent
-                        if (isColorConsistent(src, originalMask, x, y, newColor)) {
-                            processedMask.at<uchar>(y, x) = 255;
-                        }
                     }
                 }
             }
@@ -314,62 +307,39 @@ Mat bicubic_reconstruction(const Mat& src) {
                     for (int dy = -1; dy <= 1; dy++) {
                         for (int dx = -1; dx <= 1; dx++) {
                             if (dx == 0 && dy == 0) continue;
-                            
+
                             int nx = x + dx;
                             int ny = y + dy;
-                            
+
                             if (isInside(src, Point(nx, ny)) && currentMask.at<uchar>(ny, nx) == 0) {
                                 interpolated += dst.at<Vec3b>(ny, nx);
                                 count++;
                             }
                         }
                     }
-                    
+
                     if (count > 0) {
                         Vec3b newColor = interpolated / count;
-                        
+
                         // Always apply the interpolated color
                         dst.at<Vec3b>(y, x) = newColor;
                         currentMask.at<uchar>(y, x) = 0;
                         changed = true;
 
-                        // Mark as processed if color is consistent
-                        if (isColorConsistent(src, originalMask, x, y, newColor)) {
-                            processedMask.at<uchar>(y, x) = 255;
-                        }
+
                     }
                 }
             }
         }
         
         iteration++;
-
-        // If no changes in this iteration but we still have unprocessed pixels,
-        // reset the current mask to retry unprocessed pixels
-        if (!changed && iteration < MAX_ITERATIONS) {
-            // Check if we have any unprocessed pixels from the original mask
-            bool hasUnprocessed = false;
-            for (int y = 0; y < src.rows && !hasUnprocessed; y++) {
-                for (int x = 0; x < src.cols && !hasUnprocessed; x++) {
-                    if (originalMask.at<uchar>(y, x) == 255 && processedMask.at<uchar>(y, x) == 0) {
-                        hasUnprocessed = true;
-                    }
-                }
-            }
-
-            if (hasUnprocessed) {
-                // Reset current mask for pixels that haven't been successfully processed
-                for (int y = 0; y < src.rows; y++) {
-                    for (int x = 0; x < src.cols; x++) {
-                        if (originalMask.at<uchar>(y, x) == 255 && processedMask.at<uchar>(y, x) == 0) {
-                            currentMask.at<uchar>(y, x) = 255;
-                        }
-                    }
-                }
-                changed = true;
-            }
+        if(!changed) {
+            currentMask = compute_mask(dst, maxAllowedDiff);
+            changed = true;
         }
 
+        imshow("Running", dst);
+        imshow("Mask", currentMask);
     } while (iteration < MAX_ITERATIONS && changed);
 
     return dst;

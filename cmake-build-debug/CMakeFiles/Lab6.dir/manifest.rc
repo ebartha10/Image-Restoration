@@ -1,0 +1,2 @@
+#pragma code_page(65001)
+1 /* CREATEPROCESS_MANIFEST_RESOURCE_ID */ 24 /* RT_MANIFEST */ "X:/Facultate/An3/Sem2/PI/Project/Image-Restoration/cmake-build-debug/CMakeFiles/Lab6.dir/embed.manifest"

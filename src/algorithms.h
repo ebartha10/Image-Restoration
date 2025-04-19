@@ -5,7 +5,7 @@
 #ifndef ALGORITHMS_H
 #define ALGORITHMS_H
 #include <opencv2/opencv.hpp>
-#define MAX_ITERATIONS 50
+#define MAX_ITERATIONS 10
 using namespace cv;
 using namespace std;
 Mat bilinear_reconstruction(Mat src);
