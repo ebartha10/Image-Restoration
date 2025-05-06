@@ -11,6 +11,8 @@ add_executable(Lab6
         main.cpp
         src/algorithms.cpp
         src/algorithms.h
+        src/inpainting.h
+        src/inpainting.cpp
 )
 
 target_link_libraries(Lab6 ${OpenCV_LIBS})

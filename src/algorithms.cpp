@@ -30,7 +30,7 @@ Mat compute_mask(Mat src, const int threshhold) {
                         int nx = x + dx;
                         int ny = y + dy;
 
-                        if (isInside(src, Point(nx, ny)) && mask.at<uchar>(nx, ny) == 0) {
+                        if (isInside(src, Point(nx, ny)) && mask.at<uchar>(ny, nx) == 0) {
                             int neighborSaturation = saturation.at<uchar>(ny, nx);
 
                             int satDiff = abs(currentSaturation - neighborSaturation);

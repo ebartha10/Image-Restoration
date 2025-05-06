@@ -10,4 +10,5 @@ using namespace cv;
 using namespace std;
 Mat bilinear_reconstruction(Mat src);
 Mat bicubic_reconstruction(const Mat& src);
+Mat compute_mask(Mat src, const int threshold);
 #endif //ALGORITHMS_H

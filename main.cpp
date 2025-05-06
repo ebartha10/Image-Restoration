@@ -1,39 +1,150 @@
 #include <iostream>
 #include <opencv2/opencv.hpp>
 #include "src/algorithms.h"
+#include "src/inpainting.h"
+
 using namespace std;
 using namespace cv;
+#define DEBUG 1
+void runCriminisi (const String colorFilename, const string maskFilename){
+     // --------------- read filename strings ------------------
+    
+    // ---------------- read the images ------------------------
+    // colorMat     - color picture + border
+    // maskMat      - mask picture + border
+    // grayMat      - gray picture + border
+    cv::Mat colorMat, maskMat, grayMat;
+    loadInpaintingImages(
+                         colorFilename,
+                         maskFilename,
+                         colorMat,
+                         maskMat,
+                         grayMat
+                         );
+    imshow("Initial photo", colorMat);
 
-int main() {
+    // confidenceMat - confidence picture + border
+    cv::Mat confidenceMat;
+    maskMat.convertTo(confidenceMat, CV_32F);
+    confidenceMat /= 255.0f;
+    
+    // ---------------- start the algorithm -----------------
+    
+    contours_t contours;            // mask contours
+    hierarchy_t hierarchy;          // contours hierarchy
+    
+    
+    // priorityMat - priority values for all contour points + border
+    cv::Mat priorityMat(
+                        confidenceMat.size(),
+                        CV_32FC1
+                        );  // priority value matrix for each contour point
+    
+    assert(
+           colorMat.size() == grayMat.size() &&
+           colorMat.size() == confidenceMat.size() &&
+           colorMat.size() == maskMat.size()
+           );
+    
+    cv::Point psiHatP;          // psiHatP - point of highest confidence
+    
+    cv::Mat psiHatPColor;       // color patch around psiHatP
+    
+    cv::Mat psiHatPConfidence;  // confidence patch around psiHatP
+    double confidence;          // confidence of psiHatPConfidence
+    
+    cv::Point psiHatQ;          // psiHatQ - point of closest patch
+    
+    cv::Mat result;             // holds result from template matching
+    cv::Mat erodedMask;         // eroded mask
+    
+    cv::Mat templateMask;       // mask for template match (3 channel)
+    
+    // eroded mask is used to ensure that psiHatQ is not overlapping with target
+    cv::erode(maskMat, erodedMask, cv::Mat(), cv::Point(-1, -1), RADIUS);
+    
+    cv::Mat drawMat;
+    
+    
+    // main loop
+    const size_t area = maskMat.total();
+    
+    while (cv::countNonZero(maskMat) != area)   // end when target is filled
+    {
+        cout << "Progress: " << (double) countNonZero(maskMat) / area << endl;
+        // set priority matrix to -.1, lower than 0 so that border area is never selected
+        priorityMat.setTo(-0.1f);
+        
+        // get the contours of mask
+        getContours((maskMat == 0), contours, hierarchy);
 
-    Mat source = imread("X:\\Facultate\\An3\\Sem2\\PI\\Project\\Image-Restoration\\images\\gradientBrush.bmp",
-                        IMREAD_COLOR);
+        if (DEBUG) {
+            drawMat = colorMat.clone();
+            imshow("pulea", drawMat);
+        }
+        
+        // compute the priority for all contour points
+        computePriority(contours, grayMat, confidenceMat, priorityMat);
+        
+        // get the patch with the greatest priority
+        cv::minMaxLoc(priorityMat, NULL, NULL, NULL, &psiHatP);
+        psiHatPColor = getPatch(colorMat, psiHatP);
+        psiHatPConfidence = getPatch(confidenceMat, psiHatP);
+        
+        cv::Mat confInv = (psiHatPConfidence != 0.0f);
+        confInv.convertTo(confInv, CV_32F);
+        confInv /= 255.0f;
+        // get the patch in source with least distance to psiHatPColor wrt source of psiHatP
+        cv::Mat mergeArrays[3] = {confInv, confInv, confInv};
+        cv::merge(mergeArrays, 3, templateMask);
+        result = computeSSD(psiHatPColor, colorMat, templateMask, psiHatP);
+        
+        // set all target regions to 1.1, which is over the maximum value possilbe
+        // from SSD
+        result.setTo(1.1f, erodedMask == 0);
+        // get minimum point of SSD between psiHatPColor and colorMat
+        cv::minMaxLoc(result, NULL, NULL, &psiHatQ);
+        
+        // Ensure psiHatQ is within valid bounds
+        if (RADIUS > psiHatQ.x || psiHatQ.x >= colorMat.cols-RADIUS || 
+            RADIUS > psiHatQ.y || psiHatQ.y >= colorMat.rows-RADIUS) {
+            //std::cout << "WARNING: psiHatQ (" << psiHatQ.x << ", " << psiHatQ.y
+            //          << ") too close to border, adjusting..." << std::endl;
+            
+            // Adjust coordinates to be within valid bounds
+            psiHatQ.x = std::max(RADIUS, std::min(psiHatQ.x, colorMat.cols-RADIUS-1));
+            psiHatQ.y = std::max(RADIUS, std::min(psiHatQ.y, colorMat.rows-RADIUS-1));
+            
+            //std::cout << "Adjusted psiHatQ to (" << psiHatQ.x << ", " << psiHatQ.y << ")" << std::endl;
+        }
+        
+        assert(psiHatQ != psiHatP);
 
-    namedWindow("source", WINDOW_NORMAL);
-    namedWindow("Restored Image bicubic", WINDOW_NORMAL);
-    namedWindow("Restored Image bilinear", WINDOW_NORMAL);
-    int width = source.cols ;
-    int height = source.rows ;
-    resizeWindow("source", width, height);
-    resizeWindow("Restored Image bicubic", width, height);
-    resizeWindow("Restored Image bilinear", width, height);
+        // updates
+        // copy from psiHatQ to psiHatP for each colorspace
+        transferPatch(psiHatQ, psiHatP, grayMat, (maskMat == 0));
+        transferPatch(psiHatQ, psiHatP, colorMat, (maskMat == 0));
+        
+        // fill in confidenceMat with confidences C(pixel) = C(psiHatP)
+        confidence = computeConfidence(psiHatPConfidence);
+        assert(0 <= confidence && confidence <= 1.0f);
+        // update confidence
+        psiHatPConfidence.setTo(confidence, (psiHatPConfidence == 0.0f));
+        // update maskMat
+        maskMat = (confidenceMat != 0.0f);
 
-    imshow("source", source);
-
-    Mat restored = bicubic_reconstruction(source);
-
-    imshow("Restored Image bicubic", restored);
-    if (!imwrite("RestoredImage.bmp", restored)) {
-        cerr << "Failed to write the image to file." << endl;
+        // After copying the patch, blend with the surrounding area
+        cv::Mat patch = getPatch(colorMat, psiHatP);
+        cv::Mat blended;
+        cv::addWeighted(patch, 0.7, getPatch(colorMat, psiHatQ), 0.3, 0, blended);
+        blended.copyTo(getPatch(colorMat, psiHatP), getPatch(maskMat, psiHatP));
     }
 
-    // Mat restored2 = bilinear_reconstruction(source);
-    //
-    // imshow("Restored Image bilinear", restored2);
-    // if (!imwrite("RestoredImage.bmp", restored2)) {
-    //     cerr << "Failed to write the image to file." << endl;
-    // }
-
+    showMat("final result", colorMat, 0);
+    waitKey();
+}
+int main() {
+    runCriminisi("X:\\Facultate\\An3\\Sem2\\PI\\Project\\Image-Restoration\\images\\grassway.png", "X:\\Facultate\\An3\\Sem2\\PI\\Project\\Image-Restoration\\images\\grassway_mask.png");
     waitKey();
 
     return 0;
