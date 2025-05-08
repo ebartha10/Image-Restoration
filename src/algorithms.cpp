@@ -70,6 +70,7 @@ Mat bilinear_reconstruction(Mat src) {
     Mat dst = src.clone();
 
     do {
+        std::cout << "Iteration: " << iteration << std::endl;
         changed = false;
         mask = compute_mask(dst, maxSatDiff);
 
@@ -105,9 +106,6 @@ Mat bilinear_reconstruction(Mat src) {
                 }
             }
         }
-        imshow(to_string(iteration), dst);
-        imshow("mask", mask);
-        waitKey(1);
     } while (iteration++ < MAX_ITERATIONS && changed);
     return dst;
 }
@@ -257,7 +255,7 @@ Mat bicubic_reconstruction(const Mat& src) {
     Mat originalMask = currentMask.clone();
     do {
         changed = false;
-
+        std::cout << "Iteration: " << iteration << std::endl;
         // First pass: bicubic interpolation
         for (int y = 0; y < src.rows; y++) {
             for (int x = 0; x < src.cols; x++) {
@@ -337,8 +335,6 @@ Mat bicubic_reconstruction(const Mat& src) {
             currentMask = compute_mask(dst, maxAllowedDiff);
             changed = true;
         }
-
-        imshow("Running", dst);
         imshow("Mask", currentMask);
     } while (iteration < MAX_ITERATIONS && changed);
 

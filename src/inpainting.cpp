@@ -12,9 +12,21 @@ int PATCH_RADIUS = 4;
 
 
 
-/*
- * Load the color, mask, grayscale images with a border of size
- * radius around every image to prevent boundary collisions when taking patches
+/**
+ * Loads and prepares images for the inpainting process.
+ * 
+ * @param colorFilename Path to the color image file
+ * @param maskFilename Path to the mask image file (0 for holes, 255 for filled regions)
+ * @param colorMat Output color image matrix (normalized to [0,1])
+ * @param maskMat Output mask matrix (0 for holes, 255 for filled)
+ * @param grayMat Output grayscale version of the color image
+ * 
+ * The function:
+ * 1. Loads the color and mask images
+ * 2. Ensures mask matches color image dimensions
+ * 3. Normalizes color values to [0,1]
+ * 4. Adds padding around images to handle boundary cases
+ * 5. Converts color to grayscale for processing
  */
 void loadInpaintingImages(const std::string& colorFilename,
                          const std::string& maskFilename,
@@ -68,7 +80,7 @@ void loadInpaintingImages(const std::string& colorFilename,
 /*
  * Show a Mat object quickly. For testing purposes only.
  */
-void showMat(const String& winname, const Mat& mat, int time = 5)
+void showMat(const String& winname, const Mat& mat, int time)
 {
     assert(!mat.empty());
     namedWindow(winname);
@@ -90,20 +102,23 @@ void getContours(const Mat& mask,
 }
 
 
-/*
- * Get a patch of size RADIUS around point p in mat.
+/**
+ * Extracts a patch of size (2*RADIUS + 1) x (2*RADIUS + 1) centered at point p.
+ * 
+ * @param mat Source image matrix
+ * @param p Center point of the patch
+ * @return Mat containing the extracted patch
+ * @throws std::out_of_range if point is too close to image boundary
  */
 Mat getPatch(const Mat& mat, const Point& p)
 {
-    // Check if point is within valid bounds
+    // Validate patch boundaries
     if (RADIUS > p.x || p.x >= mat.cols-RADIUS || 
         RADIUS > p.y || p.y >= mat.rows-RADIUS) {
-        std::cout << "WARNING: Point (" << p.x << ", " << p.y 
-                  << ") too close to border for patch extraction" << std::endl;
-        std::cout << "Image size: " << mat.size() << ", RADIUS: " << RADIUS << std::endl;
-        std::cout << "Valid x range: [" << RADIUS << ", " << mat.cols-RADIUS-1 << "]" << std::endl;
-        std::cout << "Valid y range: [" << RADIUS << ", " << mat.rows-RADIUS-1 << "]" << std::endl;
-        throw std::out_of_range("Point too close to border for patch extraction");
+        std::cerr << "Patch extraction failed: Point (" << p.x << ", " << p.y 
+                  << ") too close to image boundary" << std::endl;
+        std::cerr << "Image size: " << mat.size() << ", Required margin: " << RADIUS << std::endl;
+        throw std::out_of_range("Point too close to boundary for patch extraction");
     }
 
     return mat(Range(p.y-RADIUS, p.y+RADIUS+1),
@@ -111,18 +126,41 @@ Mat getPatch(const Mat& mat, const Point& p)
 }
 
 
-// get the x and y derivatives of a patch centered at patchCenter in image
-// computed using a 3x3 sobel filter
-void getDerivatives(const Mat& grayMat, Mat& dx, Mat& dy)
+/**
+ * Computes image gradients and their magnitude.
+ * Uses Sobel operators for gradient computation and combines them for magnitude.
+ * 
+ * @param grayMat Input grayscale image
+ * @param dx Output x-direction gradient
+ * @param dy Output y-direction gradient
+ * @param magnitude Output gradient magnitude
+ */
+void getDerivatives(const Mat& grayMat, Mat& dx, Mat& dy, Mat& magnitude)
 {
     assert(grayMat.type() == CV_32FC1);
-    Sobel(grayMat, dx, -1, 1, 0, -1);
-    Sobel(grayMat, dy, -1, 0, 1, -1);
+    
+    // Compute gradients using Sobel operators
+    Sobel(grayMat, dx, -1, 1, 0, -1);  // x-direction gradient
+    Sobel(grayMat, dy, -1, 0, 1, -1);  // y-direction gradient
+    
+    // Compute gradient magnitude
+    magnitude = Mat::zeros(grayMat.size(), CV_32F);
+    for(int y = 0; y < grayMat.rows; y++) {
+        for(int x = 0; x < grayMat.cols; x++) {
+            float gx = dx.at<float>(y, x);
+            float gy = dy.at<float>(y, x);
+            magnitude.at<float>(y, x) = std::sqrt(gx*gx + gy*gy);
+        }
+    }
 }
 
 
-/*
- * Get the unit normal of a dense list of boundary points centered around point p.
+/**
+ * Computes the unit normal vector at a point on the contour using least squares regression.
+ * 
+ * @param contour Vector of points forming the contour
+ * @param point The point at which to compute the normal
+ * @return Unit normal vector as Point2f
  */
 Point2f getNormal(const contour_t& contour, const Point& point)
 {
@@ -189,18 +227,27 @@ Point2f getNormal(const contour_t& contour, const Point& point)
 }
 
 
-/*
- * Return the confidence of confidencePatch
+/**
+ * Computes the confidence value for a patch.
+ * Confidence is the average of all confidence values in the patch.
+ * 
+ * @param confidencePatch Matrix containing confidence values
+ * @return Average confidence value in range [0,1]
  */
 double computeConfidence(const Mat& confidencePatch)
 {
-    return sum(confidencePatch)[0] / (double)confidencePatch.total();
+    return mean(confidencePatch)[0];
 }
 
 
-/*
- * Iterate over every contour point in contours and compute the
- * priority of path centered at point using grayMat and confidenceMat
+/**
+ * Computes the priority for each point on the contour.
+ * Priority = |confidence * gradient · normal|
+ * 
+ * @param contours Vector of contours to process
+ * @param grayMat Grayscale version of the image
+ * @param confidenceMat Matrix containing confidence values
+ * @param priorityMat Output matrix to store computed priorities
  */
 void computePriority(const contours_t& contours, 
                     const Mat& grayMat, 
@@ -211,68 +258,49 @@ void computePriority(const contours_t& contours,
            priorityMat.type() == CV_32FC1 &&
            confidenceMat.type() == CV_32FC1);
 
-    // define some patches
-    Mat confidencePatch;
-    Mat magnitudePatch;
-
-    Point2f normal;
-    Point maxPoint;
-    Point2f gradient;
-
-    double confidence;
-
-    // get the derivatives and magnitude of the greyscale image
+    // Initialize matrices
     Mat dx, dy, magnitude;
-    getDerivatives(grayMat, dx, dy);
-    magnitude(dx, dy, magnitude);
-
-    // mask the magnitude
-    Mat maskedMagnitude(magnitude.size(), magnitude.type(), Scalar_<float>(0));
+    getDerivatives(grayMat, dx, dy, magnitude);
+    
+    // Create masked magnitude matrix
+    Mat maskedMagnitude = Mat::zeros(magnitude.size(), magnitude.type());
     magnitude.copyTo(maskedMagnitude, (confidenceMat != 0.0f));
     erode(maskedMagnitude, maskedMagnitude, Mat());
 
-    assert(maskedMagnitude.type() == CV_32FC1);
-
-    // for each point in contour
-    Point point;
-
-    for (int i = 0; i < contours.size(); ++i) {
-        contour_t contour = contours[i];
-
-        for (int j = 0; j < contour.size(); ++j) {
-            point = contour[j];
-
-            // Skip points that are too close to the border
+    // Process each contour point
+    for (const auto& contour : contours) {
+        for (const auto& point : contour) {
+            // Skip boundary points
             if (RADIUS > point.x || point.x >= grayMat.cols-RADIUS || 
                 RADIUS > point.y || point.y >= grayMat.rows-RADIUS) {
                 continue;
             }
 
             try {
-                confidencePatch = getPatch(confidenceMat, point);
-
-                // get confidence of patch
-                confidence = sum(confidencePatch)[0] / (double)confidencePatch.total();
-                assert(0 <= confidence && confidence <= 1.0f);
-
-                // get the normal to the border around point
-                normal = getNormal(contour, point);
-
-                // get the maximum gradient in source around patch
-                magnitudePatch = getPatch(maskedMagnitude, point);
-                minMaxLoc(magnitudePatch, NULL, NULL, NULL, &maxPoint);
-                gradient = Point2f(
-                    -getPatch(dy, point).ptr<float>(maxPoint.y)[maxPoint.x],
-                    getPatch(dx, point).ptr<float>(maxPoint.y)[maxPoint.x]
+                // Get confidence value
+                Mat confidencePatch = getPatch(confidenceMat, point);
+                double confidence = computeConfidence(confidencePatch);
+                
+                // Get normal vector
+                Point2f normal = getNormal(contour, point);
+                
+                // Find maximum gradient in source region
+                Mat magnitudePatch = getPatch(maskedMagnitude, point);
+                Point maxPoint;
+                minMaxLoc(magnitudePatch, nullptr, nullptr, nullptr, &maxPoint);
+                
+                // Compute gradient vector
+                Point2f gradient(
+                    -getPatch(dy, point).at<float>(maxPoint.y, maxPoint.x),
+                    getPatch(dx, point).at<float>(maxPoint.y, maxPoint.x)
                 );
-
-                // set the priority in priorityMat
-                priorityMat.ptr<float>(point.y)[point.x] = 
-                    std::abs((float)confidence * gradient.dot(normal));
-                assert(priorityMat.ptr<float>(point.y)[point.x] >= 0);
+                
+                // Compute and store priority
+                priorityMat.at<float>(point.y, point.x) = 
+                    std::abs(static_cast<float>(confidence) * gradient.dot(normal));
             } 
             catch (const std::exception& e) {
-                std::cout << "Error processing point (" << point.x << ", " << point.y 
+                std::cerr << "Error processing point (" << point.x << ", " << point.y 
                           << "): " << e.what() << std::endl;
                 continue;
             }
@@ -281,9 +309,13 @@ void computePriority(const contours_t& contours,
 }
 
 
-/*
- * Transfer the values from patch centered at psiHatQ to patch centered at psiHatP in
- * mat according to maskMat.
+/**
+ * Transfers pixel values from source patch to target patch according to mask.
+ * 
+ * @param psiHatQ Center point of source patch
+ * @param psiHatP Center point of target patch
+ * @param mat Image matrix to modify
+ * @param maskMat Binary mask (0 for holes, 255 for filled)
  */
 void transferPatch(const Point& psiHatQ, 
                   const Point& psiHatP, 
@@ -301,10 +333,15 @@ void transferPatch(const Point& psiHatQ,
     getPatch(mat, psiHatQ).copyTo(getPatch(mat, psiHatP), getPatch(maskMat, psiHatP));
 }
 
-/*
- * Runs template matching with template and mask templateMask on source.
- * Resulting Mat is stored in result.
- *
+/**
+ * Computes Sum of Squared Differences (SSD) between template and source image regions.
+ * Includes border handling and spatial weighting for local patch preference.
+ * 
+ * @param tmplate Template patch to match
+ * @param source Source image to search in
+ * @param tmplateMask Mask for the template
+ * @param targetCenter Center point of target region
+ * @return Matrix of SSD values, normalized to [0,1]
  */
 Mat computeSSD(const Mat& tmplate, 
               const Mat& source, 
@@ -313,21 +350,19 @@ Mat computeSSD(const Mat& tmplate,
 {
     assert(tmplate.type() == CV_32FC3 && source.type() == CV_32FC3);
     assert(tmplate.rows <= source.rows && tmplate.cols <= source.cols);
-    assert(tmplateMask.size() == tmplate.size() && tmplate.type() == tmplateMask.type());
+    assert(tmplateMask.size() == tmplate.size());
 
-    Mat result(source.rows - tmplate.rows + 1, 
-              source.cols - tmplate.cols + 1, 
-              CV_32F, 0.0f);
-
+    // Compute SSD using template matching
+    Mat result;
     matchTemplate(source, tmplate, result, TM_SQDIFF, tmplateMask);
     normalize(result, result, 0, 1, NORM_MINMAX);
     
-    // Add border with high values to prevent selecting points too close to border
+    // Add border padding
     copyMakeBorder(result, result, 
                   RADIUS, RADIUS, RADIUS, RADIUS, 
                   BORDER_CONSTANT, 1.1f);
     
-    // Set border regions to high values to prevent selection
+    // Create and apply border mask
     Mat borderMask = Mat::zeros(result.size(), CV_8U);
     rectangle(borderMask, 
              Point(RADIUS, RADIUS), 
@@ -336,18 +371,6 @@ Mat computeSSD(const Mat& tmplate,
              -1);
     bitwise_not(borderMask, borderMask);
     result.setTo(1.1f, borderMask);
-
-    // // Add spatial penalty to prefer local patches
-    // float lambda = 0.1f; // Tune this value as needed
-    // for (int y = 0; y < result.rows; ++y) {
-    //     for (int x = 0; x < result.cols; ++x) {
-    //         int src_x = x + RADIUS;
-    //         int src_y = y + RADIUS;
-    //         float dist2 = (src_x - targetCenter.x) * (src_x - targetCenter.x) +
-    //                       (src_y - targetCenter.y) * (src_y - targetCenter.y);
-    //         result.at<float>(y, x) += lambda * dist2;
-    //     }
-    // }
 
     return result;
 }
