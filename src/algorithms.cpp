@@ -250,9 +250,10 @@ Mat bicubic_reconstruction(const Mat& src) {
 
     bool changed = false;
     int iteration = 0;
-    constexpr int maxAllowedDiff = 20   ;
+    constexpr int maxAllowedDiff = 20;
     Mat currentMask = compute_mask(src, maxAllowedDiff);
     Mat originalMask = currentMask.clone();
+
     do {
         changed = false;
         std::cout << "Iteration: " << iteration << std::endl;
@@ -293,7 +294,6 @@ Mat bicubic_reconstruction(const Mat& src) {
                 }
             }
         }
-        
         // Second pass: bilinear interpolation for remaining pixels
         for (int y = 0; y < src.rows; y++) {
             for (int x = 0; x < src.cols; x++) {
@@ -315,7 +315,6 @@ Mat bicubic_reconstruction(const Mat& src) {
                             }
                         }
                     }
-
                     if (count > 0) {
                         Vec3b newColor = interpolated / count;
 
@@ -323,8 +322,6 @@ Mat bicubic_reconstruction(const Mat& src) {
                         dst.at<Vec3b>(y, x) = newColor;
                         currentMask.at<uchar>(y, x) = 0;
                         changed = true;
-
-
                     }
                 }
             }
@@ -335,6 +332,153 @@ Mat bicubic_reconstruction(const Mat& src) {
             currentMask = compute_mask(dst, maxAllowedDiff);
             changed = true;
         }
+        imshow("Mask", currentMask);
+    } while (iteration < MAX_ITERATIONS && changed);
+
+    return dst;
+}
+
+/**
+ * Reconstructs a given colored image using bilinear interpolation with a provided mask.
+ * @param src Image to restore. Needs to be a colored image.
+ * @param mask Mask image to use for interpolation
+ * @return Restored image with masked pixels interpolated with neighbors.
+ */
+Mat bilinear_reconstruction_with_mask(Mat src, Mat mask) {
+    Mat initialMask = mask.clone();
+    bool changed = false;
+    int iteration = 0;
+    Mat dst = src.clone();
+
+    do {
+        std::cout << "Iteration: " << iteration << std::endl;
+        changed = false;
+
+        for (int y = 0; y < src.rows; y++) {
+            for (int x = 0; x < src.cols; x++) {
+                if (mask.at<uchar>(y, x) == 255) {
+                    Vec3f interpolated = Vec3f(0, 0, 0);
+                    int count = 0;
+                    vector<Point> neighbors;
+
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            int nx = x + dx;
+                            int ny = y + dy;
+                            if (nx == x && ny == y) {
+                                continue;
+                            }
+                            neighbors.push_back(Point(nx, ny));
+                        }
+                    }
+
+                    for (auto point : neighbors) {
+                        if (isInside(src, point) && mask.at<uchar>(point.y, point.x) == 0 && initialMask.at<uchar>(point.y, point.x) == 0) {
+                            interpolated += dst.at<Vec3b>(point.y, point.x);
+                            count++;
+                        }
+                    }
+                    if (count > 0) {
+                        dst.at<Vec3b>(y, x) = interpolated / count;
+                        initialMask.at<uchar>(y, x) = 0;
+                        mask.at<uchar>(y, x) = 0;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    } while (iteration++ < MAX_ITERATIONS && changed);
+    return dst;
+}
+
+/**
+ * Reconstructs a given colored image using bicubic interpolation with a provided mask.
+ * @param src Image to restore. Needs to be a colored image.
+ * @param mask Mask image to use for interpolation
+ * @return Restored image with masked pixels interpolated with neighbors.
+ */
+Mat bicubic_reconstruction_with_mask(const Mat& src, Mat mask) {
+    Mat dst = src.clone();
+    Mat processedMask = Mat::zeros(mask.size(), CV_8U); // Track successfully processed pixels
+    Mat currentMask = mask.clone();
+    Mat originalMask = mask.clone();
+
+    bool changed = false;
+    int iteration = 0;
+
+    do {
+        changed = false;
+        std::cout << "Iteration: " << iteration << std::endl;
+        // First pass: bicubic interpolation
+        for (int y = 0; y < src.rows; y++) {
+            for (int x = 0; x < src.cols; x++) {
+                if (currentMask.at<uchar>(y, x) == 255 && hasValidNeighbors(currentMask, x, y)) {
+                    Vec3f interpolated(0, 0, 0);
+                    bool validInterpolation = true;
+
+                    // Perform bicubic interpolation for each channel
+                    for (int c = 0; c < 3; c++) {
+                        float kernel[4][4];
+                        int validPixels = getKernel(dst, currentMask, x, y, c, kernel);
+
+                        if (processKernel(kernel, validPixels)) {
+                            float value = bicubicInterpolate(kernel, 0.5f, 0.5f);
+                            interpolated[c] = value;
+                        } else {
+                            validInterpolation = false;
+                            break;
+                        }
+                    }
+
+                    if (validInterpolation) {
+                        Vec3b newColor(
+                            saturate_cast<uchar>(interpolated[0]),
+                            saturate_cast<uchar>(interpolated[1]),
+                            saturate_cast<uchar>(interpolated[2])
+                        );
+
+                        // Always apply the interpolated color
+                        dst.at<Vec3b>(y, x) = newColor;
+                        currentMask.at<uchar>(y, x) = 0;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        // Second pass: bilinear interpolation for remaining pixels
+        for (int y = 0; y < src.rows; y++) {
+            for (int x = 0; x < src.cols; x++) {
+                if (currentMask.at<uchar>(y, x) == 255) {
+                    Vec3f interpolated = Vec3f(0, 0, 0);
+                    int count = 0;
+
+                    // Check 8-connected neighbors
+                    for (int dy = -1; dy <= 1; dy++) {
+                        for (int dx = -1; dx <= 1; dx++) {
+                            if (dx == 0 && dy == 0) continue;
+
+                            int nx = x + dx;
+                            int ny = y + dy;
+
+                            if (isInside(src, Point(nx, ny)) && currentMask.at<uchar>(ny, nx) == 0) {
+                                interpolated += dst.at<Vec3b>(ny, nx);
+                                count++;
+                            }
+                        }
+                    }
+                    if (count > 0) {
+                        Vec3b newColor = interpolated / count;
+
+                        // Always apply the interpolated color
+                        dst.at<Vec3b>(y, x) = newColor;
+                        currentMask.at<uchar>(y, x) = 0;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        
+        iteration++;
         imshow("Mask", currentMask);
     } while (iteration < MAX_ITERATIONS && changed);
 
